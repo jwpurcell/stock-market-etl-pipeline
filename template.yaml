@@ -20,6 +20,9 @@ Resources:
       CodeUri: hello_world/
       Handler: app.lambda_handler
       Runtime: python3.14
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref StockDataBucket
       Architectures:
       - x86_64
       Events:
@@ -30,7 +33,11 @@ Resources:
             Name: DailyStockFetchSchedule
             Description: Triggers stock data fetch once daily after the market closes
             Enabled: true
-
+  StockDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "stock-market-etl-data-${AWS::AccountId}"
+  
 Outputs:
   # ServerlessRestApi is an implicit API created out of Events key under Serverless::Function
   # Find out more about other implicit resources you can reference within SAM
