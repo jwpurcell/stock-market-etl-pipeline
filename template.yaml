@@ -23,6 +23,8 @@ Resources:
       Policies:
         - S3WritePolicy:
             BucketName: !Ref StockDataBucket
+        - SSMParameterReadPolicy:
+            ParameterName: alphavantage-api-key
       Architectures:
       - x86_64
       Events:
