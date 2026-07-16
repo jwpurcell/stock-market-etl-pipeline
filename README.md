@@ -1,130 +1,138 @@
 # stock-market-etl-pipeline
 
-This project contains source code and supporting files for a serverless application that you can deploy with the SAM CLI. It includes the following files and folders.
+A serverless ETL pipeline tracking daily stock market data for a set of equities (IBM, AAPL, MSFT), built on AWS SAM, Lambda, and EventBridge.
 
-- hello_world - Code for the application's Lambda function.
-- events - Invocation events that you can use to invoke the function.
-- tests - Unit tests for the application code. 
-- template.yaml - A template that defines the application's AWS resources.
+The pipeline fetches daily time series data from the Alpha Vantage API, flags significant price movements against a threshold, writes the enriched data to an S3 bucket partitioned Hive-style, supporting future querying and dashboard layer. 
 
-The application uses several AWS resources, including Lambda functions and an API Gateway API. These resources are defined in the `template.yaml` file in this project. You can update the template to add AWS resources through the same deployment process that updates your application code.
+Built as a portfolio project to demonstrate practical AWS serverless architecture and data engineering fundamentals.
 
-If you prefer to use an integrated development environment (IDE) to build and test your application, you can use the AWS Toolkit.  
-The AWS Toolkit is an open source plug-in for popular IDEs that uses the SAM CLI to build and deploy serverless applications on AWS. The AWS Toolkit also adds a simplified step-through debugging experience for Lambda function code. See the following links to get started.
+**Status**: V1
 
-* [CLion](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [GoLand](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [IntelliJ](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [WebStorm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [Rider](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [PhpStorm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [PyCharm](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [RubyMine](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [DataGrip](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/welcome.html)
-* [VS Code](https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/welcome.html)
-* [Visual Studio](https://docs.aws.amazon.com/toolkit-for-visual-studio/latest/user-guide/welcome.html)
+## Architecture 
 
-## Deploy the sample application
+The pipeline runs automatically once daily via an EventBridge scheduled rule, which invokes the Lambda function to execute the following three stages:
 
-The Serverless Application Model Command Line Interface (SAM CLI) is an extension of the AWS CLI that adds functionality for building and testing Lambda applications. It uses Docker to run your functions in an Amazon Linux environment that matches Lambda. It can also emulate your application's build environment and API.
+**Extract**: fetches daily time series data for tracked equites (IBM, AAPL, MSFT) from the Alpha Vantage API, retrieving the API key securely from SSM Parameter Store.
 
-To use the SAM CLI, you need the following tools.
+**Transform**: Computes daily percentage change for the most recent trading day and flags moves exceeding a 3% threshold as significant, tagging the data in place. 
 
-* SAM CLI - [Install the SAM CLI](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-install.html)
-* [Python 3 installed](https://www.python.org/downloads/)
-* Docker - [Install Docker community edition](https://hub.docker.com/search/?type=edition&offering=community)
+**Load**: Writes the enriched data to S3 using Hive-style partitioning (`symbol=/year=/month=/day=`), chosen to support future querying by symbol as the primary access pattern.
 
-To build and deploy your application for the first time, run the following in your shell:
+## Setup
 
-```bash
-sam build --use-container
-sam deploy --guided
+```
+# clone the repo 
+git clone <repo_url>
+cd stock-market-etl-pipeline
+
+# Install Python dependencies (local testing)
+python -m pip install -r fetch_stock_data/requirements.txt
+python -m pip install boto3
+python -m pip install -r tests/requirements.txt
+
+# Configure AWS credentials 
+aws configure 
+
+# Store your Alpha Vantage API key securely in SSM Parameter Store
+aws ssm put-parameter \
+  --name "/alphavantage-api-key" \
+  --value "YOUR_API_KEY_HERE" \ 
+  --type "SecureString"
+
+# Validate SAM template 
+sam validate 
+
+# Build the application  
+sam build 
+
+# Deploy (first time, guided)
+sam deploy --guided 
 ```
 
-The first command will build the source of your application. The second command will package and deploy your application to AWS, with a series of prompts:
+## Design
 
-* **Stack Name**: The name of the stack to deploy to CloudFormation. This should be unique to your account and region, and a good starting point would be something matching your project name.
-* **AWS Region**: The AWS region you want to deploy your app to.
-* **Confirm changes before deploy**: If set to yes, any change sets will be shown to you before execution for manual review. If set to no, the AWS SAM CLI will automatically deploy application changes.
-* **Allow SAM CLI IAM role creation**: Many AWS SAM templates, including this example, create AWS IAM roles required for the AWS Lambda function(s) included to access AWS services. By default, these are scoped down to minimum required permissions. To deploy an AWS CloudFormation stack which creates or modifies IAM roles, the `CAPABILITY_IAM` value for `capabilities` must be provided. If permission isn't provided through this prompt, to deploy this example you must explicitly pass `--capabilities CAPABILITY_IAM` to the `sam deploy` command.
-* **Save arguments to samconfig.toml**: If set to yes, your choices will be saved to a configuration file inside the project, so that in the future you can just re-run `sam deploy` without parameters to deploy changes to your application.
+### Data/pipeline design
 
-You can find your API Gateway Endpoint URL in the output values displayed after deployment.
+**3% significance threshold**
 
-## Use the SAM CLI to build and test locally
+This threshold was chosen empirically rather than assumed. After deciding to tag (not filter) the daily data with a percentage chance flag, I tested 2% and 3% cutoffs against real historical data for all three symbols tracked by default. At 2%, IBM alone flagged 35% of days, which was too broad to signal genuine volatility. At 3% all three symbols landed in a tighter more consistent 6-22% range, giving more meaningful "notable day" signalling across the board.
 
-Build your application with the `sam build --use-container` command.
+**Tag/annotate over filter**
 
-```bash
-stock-market-etl-pipeline$ sam build --use-container
-```
+Rather than filtering out the non-significant days, every fetched record is tagged in place with its computed percentage change and significance flag, preeserving the full raw dataset. Filtering would permanently lose the ability to answer questions like "show me every day's price" or recomputevolatility with a different threshold" later, since discarded data can't be recovered retroactively. Tagging keeps that flexibility, future analysis, dashboards or Athena query can filter at query time however it needs. 
 
-The SAM CLI installs dependencies defined in `hello_world/requirements.txt`, creates a deployment package, and saves it in the `.aws-sam/build` folder.
+**Latest-day-only tagging, not full history**
 
-Test a single function by invoking it directly with a test event. An event is a JSON document that represents the input that the function receives from the event source. Test events are included in the `events` folder in this project.
+Only the most recent day's record is tagged on each run, rather than recomputing percentage change accroess the full ~100-day history returned by Alpha vantage each call. Historical days don't change, so retagging them daily would be a redundant computation with no new information gained. This does mean historical data suts untagged until a deliberate backfill step is run. A concious tradeoff and a planned future improvement.
 
-Run functions locally and invoke them with the `sam local invoke` command.
 
-```bash
-stock-market-etl-pipeline$ sam local invoke HelloWorldFunction --event events/event.json
-```
+### Infrastructure/AWS design
 
-The SAM CLI can also emulate your application's API. Use the `sam local start-api` to run the API locally on port 3000.
+**Hive-style partitioning, `symbol=` before `year=/month=/day=`**
 
-```bash
-stock-market-etl-pipeline$ sam local start-api
-stock-market-etl-pipeline$ curl http://localhost:3000/
-```
+Data is partitioned in Hive-style partitioning with `symbol=` as the first level, rather than leading with date. This was chosen as the pipelines primary inteded access pattern, tracking each stocks full history over time (e.g. "show me all of IBM's data") rather than cross-symbol daily snapshots. The ordering also sets up efficient prefix-based querying once GLue and Athena are added, without requiring any rework of existing data.
 
-The SAM CLI reads the application template to determine the API's routes and the functions that they invoke. The `Events` property on each function's definition includes the route and method for each path.
+**US equites over ASX**
 
-```yaml
-      Events:
-        HelloWorld:
-          Type: Api
-          Properties:
-            Path: /hello
-            Method: get
-```
+US equites (IBM, AAPL, MSFT) were chosen over ASX-listed stocks primarily for better Alpha Vantage API coverage and data reliabilty.
 
-## Add a resource to your application
-The application template uses AWS Serverless Application Model (AWS SAM) to define application resources. AWS SAM is an extension of AWS CloudFormation with a simpler syntax for configuring common serverless application resources such as functions, triggers, and APIs. For resources not included in [the SAM specification](https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md), you can use standard [AWS CloudFormation](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-template-resource-type-ref.html) resource types.
+**SAM template parameter for tracking symbols, not hardcoded**
 
-## Fetch, tail, and filter Lambda function logs
+Tracked symbols are defined as a SAM parameter (`FetchRequestSymbols`), not hardcoded in `app.py`. This separates configuration from the application code, changing which stocks are tracked means updating a template and redeploying, rather than tinkering with application code and retesting pipeline logic.
 
-To simplify troubleshooting, SAM CLI has a command called `sam logs`. `sam logs` lets you fetch logs generated by your deployed Lambda function from the command line. In addition to printing the logs on the terminal, this command has several nifty features to help you quickly find the bug.
+**Environment variables sourced, rather than duplicated**
 
-`NOTE`: This command works for all AWS Lambda functions; not just the ones you deploy using SAM.
+Runtime configurations (the S3 bucket name, tracked symbols) is passed to the Lambda via environment variables sourced directly from SAM template using `!Ref`, rather than duplicated as separate hardcoded values in `app.py`. This keeps a single source of truth, if the buvket name or symbol list ever changes, it only needs to change in one place, with no risk of the template  and code being out of sync. 
 
-```bash
-stock-market-etl-pipeline$ sam logs -n HelloWorldFunction --stack-name "stock-market-etl-pipeline" --tail
-```
+### Error handling design 
 
-You can find more information and examples about filtering Lambda function logs in the [SAM CLI Documentation](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/serverless-sam-cli-logging.html).
+**Per-symbol try/except, continue-on-failure loop**
 
-## Tests
+Each symbol is fetched, transfomred, and written inside its own `try`/`except` block, so one symbol's failure doesn't halt the entire run. This was validated for real during testing. One symbol can be rate-limited mid run and the others will still suceed and write to the bucket normally.
 
-Tests are defined in the `tests` folder in this project. Use PIP to install the test dependencies and run tests.
+**Explicit validation for Alpha Vantage's "200 OK with error body" behaviour**
 
-```bash
-stock-market-etl-pipeline$ pip install -r tests/requirements.txt --user
-# unit test
-stock-market-etl-pipeline$ python -m pytest tests/unit -v
-# integration test, requiring deploying the stack first.
-# Create the env variable AWS_SAM_STACK_NAME with the name of the stack we are testing
-stock-market-etl-pipeline$ AWS_SAM_STACK_NAME="stock-market-etl-pipeline" python -m pytest tests/integration -v
-```
+Alpha Vantage returns HTTP 200 even when rate-limited, with the actual error embedded in the JSON body instead of the status code, a failure mode standard `raise_for_status()` checks don't catch. This was discovered directly during testing, not from documentation, and required an explicit check for the expected `"Time Series (Daily)"` key, raising a proper exception when it's missing the failure surfaces through the same error-handling path as any other.
 
-## Cleanup
+**Exceptions allowed to propagate with specific types**
 
-To delete the sample application that you created, use the AWS CLI. Assuming you used your project name for the stack name, you can run the following:
+`fetch_stock_data` doesnt catch its own exceptions, it lets specific types (`ConnectionError`, `HTTPError`, `JSONDecodeError`, etc.) propagate up to the caller rather than collapsing everything into a generic failure or a `None` return. This was a deliberate choice: a future retry wrapper needs to distiguish a transient network blip (worth retrying) from a bad API key, and that distinction is lost the moment errors get swallowed at the source
 
-```bash
-sam delete --stack-name "stock-market-etl-pipeline"
-```
+### Dashboard design 
 
-## Resources
+**Streamlit over traditional BI platforms (Tableau, Power BI, Matabase)**
 
-See the [AWS SAM developer guide](https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/what-is-sam.html) for an introduction to SAM specification, the SAM CLI, and serverless application concepts.
+Considered a traditional BI platform for the final dashboard layer (Metabase specifically given its free, self-hosting option). BI platforms would model a more realistic hand off point of a queryable tool to non-technical stakeholders. Streamlit was chosen instead for this stage: it demonstrates full end-to-end technical ownership (building the interface, not just using a platform) and produces a freely hosted, instantly interactable link for a resume. The BI-handoff reasoning remains a deliberate tradeoff worth revisiting for future portfolio work.
 
-Next, you can use AWS Serverless Application Repository to deploy ready to use Apps that go beyond hello world samples and learn how authors developed their applications: [AWS Serverless Application Repository main page](https://aws.amazon.com/serverless/serverlessrepo/)
+
+### Monitoring design 
+
+**CloudWatch alarm over DLQ**
+
+A CloudWatch alarm was chosen over a Dead Letter Queue for monitoring failed runs. A DLQ only captures fully failed Lambda invocations, but the pipeline's per-symbol `try`/`except` already catches and logs individual failures (e.g. a rate-limited symbol) without crashing the whole run, so the most likely failure mode never reaches "total invocation failure". A CloudWatch alarm watching for `error`-level log entries covers both that partial-failure case and genuinely unexpected crashes, making it the broader, more useful choice given pipeline's existing error handling. 
+
+## Improvements / Roadmap
+
+### In Progress: 
+
+**Retry logic with exponential backoff of the Alpha Vantage call**
+
+- Alpha Vantage's free tier has aggressive rate limits. The current pipeline lets specific exception types propagate cleanly from `fetch_stock_data`, so a retry wrapper can distinguish between failures worth retrying from permanent ones(bad API key, invalid request) rather than retrying blindly.
+
+**Data validation/schema check before writing to s3**
+
+Currently, the pipeline validates for one specific failure mode (Alpha Vantage rate-limiting, detected via a missing `"Time Series (Daily)"` key). This will be extended into a general schema/validation check confirming the full shape and types of the fetched data (open/high/low/close/volume) before writing to S3, rather than validating only the top-level structure.
+
+**Glue Crawler/Glue Data catalog + Athena workgroup for SQL queryability**
+
+The raw JSON files in S3 are partitioned Hive-style specifically so they'd be automatically discoverable by a glue crawler without a rework. Once catalogued, Athena makes the full dataset SQL-queryable, feeding directly into the dashboard layer. 
+
+### Planned: 
+
+**Streamlit dashboard reading from Athena/S3 output**
+
+An interactive dashboard hosted on Streamlit Community Cloud, reading from the pipeline's Athena/S3 output on a periodic refresh rather than live queries. This avoids public-facing credentials, and unbounded query costs as it's freely hosted.
+
+**Cloudwatch alarm for failed runs**
+
+An alarm watching for error-level entries in CloudWatch Logs, triggered by the pipeline's existing `logger.error()` calls. This surfaces partial failures (e.g. a rate-limited symbol) and any unhandled exceptions without needing to manually check logs after each run.

@@ -13,6 +13,11 @@ Globals:
     # You can add LoggingConfig parameters such as the Logformat, Log Group, and SystemLogLevel or ApplicationLogLevel. Learn more here https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-resource-function.html#sam-function-loggingconfig.
     LoggingConfig:
       LogFormat: JSON
+Parameters:
+  FetchRequestSymbols:
+    Description: symbol given to fetch_stock_data function for fetch request
+    Type: CommaDelimitedList
+    Default: IBM,AAPL,MSFT
 Resources:
   FetchStockDataFunction:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
@@ -25,6 +30,10 @@ Resources:
             BucketName: !Ref StockDataBucket
         - SSMParameterReadPolicy:
             ParameterName: alphavantage-api-key
+      Environment:
+        Variables:
+          STOCK_SYMBOLS: !Join [ ",", !Ref FetchRequestSymbols]
+          BUCKET_NAME: !Ref StockDataBucket
       Architectures:
       - x86_64
       Events:

@@ -1,72 +1,96 @@
-import json
-
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "fetch_stock_data"))
+import requests
 import pytest
+from app import apply_threshold
+from app import fetch_stock_data
 
-from hello_world import app
-
-
+# significant move sample
 @pytest.fixture()
-def apigw_event():
-    """ Generates API GW Event"""
-
+def sample_stock_data():
     return {
-        "body": '{ "test": "body"}',
-        "resource": "/{proxy+}",
-        "requestContext": {
-            "resourceId": "123456",
-            "apiId": "1234567890",
-            "resourcePath": "/{proxy+}",
-            "httpMethod": "POST",
-            "requestId": "c6af9ac6-7b61-11e6-9a41-93e8deadbeef",
-            "accountId": "123456789012",
-            "identity": {
-                "apiKey": "",
-                "userArn": "",
-                "cognitoAuthenticationType": "",
-                "caller": "",
-                "userAgent": "Custom User Agent String",
-                "user": "",
-                "cognitoIdentityPoolId": "",
-                "cognitoIdentityId": "",
-                "cognitoAuthenticationProvider": "",
-                "sourceIp": "127.0.0.1",
-                "accountId": "",
+        "Meta Data": {
+            "2. Symbol": "IBM"
+        },
+        "Time Series (Daily)": {
+            "2026-07-10": {
+                "1. open": "100.00",
+                "2. high": "106.00",
+                "3. low": "99.00",
+                "4. close": "105.00",
+                "5. volume": "1000000"
             },
-            "stage": "prod",
-        },
-        "queryStringParameters": {"foo": "bar"},
-        "headers": {
-            "Via": "1.1 08f323deadbeefa7af34d5feb414ce27.cloudfront.net (CloudFront)",
-            "Accept-Language": "en-US,en;q=0.8",
-            "CloudFront-Is-Desktop-Viewer": "true",
-            "CloudFront-Is-SmartTV-Viewer": "false",
-            "CloudFront-Is-Mobile-Viewer": "false",
-            "X-Forwarded-For": "127.0.0.1, 127.0.0.2",
-            "CloudFront-Viewer-Country": "US",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Upgrade-Insecure-Requests": "1",
-            "X-Forwarded-Port": "443",
-            "Host": "1234567890.execute-api.us-east-1.amazonaws.com",
-            "X-Forwarded-Proto": "https",
-            "X-Amz-Cf-Id": "aaaaaaaaaae3VYQb9jd-nvCd-de396Uhbp027Y2JvkCPNLmGJHqlaA==",
-            "CloudFront-Is-Tablet-Viewer": "false",
-            "Cache-Control": "max-age=0",
-            "User-Agent": "Custom User Agent String",
-            "CloudFront-Forwarded-Proto": "https",
-            "Accept-Encoding": "gzip, deflate, sdch",
-        },
-        "pathParameters": {"proxy": "/examplepath"},
-        "httpMethod": "POST",
-        "stageVariables": {"baz": "qux"},
-        "path": "/examplepath",
+            "2026-07-09": {
+                "1. open": "98.00",
+                "2. high": "99.00",
+                "3. low": "97.50",
+                "4. close": "98.50",
+                "5. volume": "900000"
+            }
+        }
     }
 
+# no significant move sample
+@pytest.fixture()
+def sample_stock_data2():
+    return {
+        "Meta Data": {
+            "2. Symbol": "IBM"
+        },
+        "Time Series (Daily)": {
+            "2026-07-10": {
+                "1. open": "100.00",
+                "2. high": "101.50",
+                "3. low": "99.50",
+                "4. close": "101.00",
+                "5. volume": "1000000"
+            },
+            "2026-07-09": {
+                "1. open": "99.00",
+                "2. high": "100.00",
+                "3. low": "98.50",
+                "4. close": "99.50",
+                "5. volume": "900000"
+            }
+        }
+    }
 
-def test_lambda_handler(apigw_event):
+# fake api response
+class FakeResponse:
+    def __init__(self, json_data):
+        self._json_data = json_data
 
-    ret = app.lambda_handler(apigw_event, "")
-    data = json.loads(ret["body"])
+    def raise_for_status(self):
+        pass
+    
+    def json(self):
+        return self._json_data
 
-    assert ret["statusCode"] == 200
-    assert "message" in ret["body"]
-    assert data["message"] == "hello world"
+def test_fetch_stock_data(monkeypatch):
+    fake_response_data = {"Information": "Thank you for using Alpha Vantage!..."}
+    def fake_get(url, params):
+        return FakeResponse(fake_response_data)
+    monkeypatch.setattr(requests, "get", fake_get)
+
+    with pytest.raises(requests.exceptions.RequestException):
+        fetch_stock_data("AAPL")
+
+
+def test_apply_threshold_significant_move(sample_stock_data):
+    data, most_recent_date = apply_threshold(sample_stock_data)
+    assert most_recent_date == "2026-07-10"
+
+    tagged_day = data["Time Series (Daily)"][most_recent_date]
+   
+    assert tagged_day["significant_move"]
+    assert tagged_day["pct_change"] == pytest.approx(5.0)
+
+def test_apply_threshold_nonsignificant_move(sample_stock_data2):
+    data, most_recent_date = apply_threshold(sample_stock_data2)
+    assert most_recent_date == "2026-07-10"
+
+    tagged_day = data["Time Series (Daily)"][most_recent_date]
+   
+    assert tagged_day["significant_move"] == False
+    assert tagged_day["pct_change"] == pytest.approx(1.0)
