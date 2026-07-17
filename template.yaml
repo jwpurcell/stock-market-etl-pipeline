@@ -19,6 +19,36 @@ Parameters:
     Type: CommaDelimitedList
     Default: IBM,AAPL,MSFT
 Resources:
+  StockDataGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: stock_market_etl_db
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: S3ReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "${StockDataBucket.Arn}"
+                  - !Sub "${StockDataBucket.Arn}/*"
   FetchStockDataFunction:
     Type: AWS::Serverless::Function # More info about Function Resource: https://github.com/awslabs/serverless-application-model/blob/master/versions/2016-10-31.md#awsserverlessfunction
     Properties:
@@ -48,7 +78,17 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub "stock-market-etl-data-${AWS::AccountId}"
-  
+  StockDataGlueCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: stock-data-crawler
+      Role: !GetAtt GlueCrawlerRole.Arn 
+      DatabaseName: !Ref StockDataGlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub "s3://${StockDataBucket}/stock-data/"
+      Schedule: 
+        ScheduleExpression: cron(30 0 * * ? *)
 Outputs:
   FetchStockDataFunction:
     Description: Fetch stock data Lambda Function ARN
