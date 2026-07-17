@@ -55,7 +55,7 @@ def fetch_stock_data(symbol):
     
     Returns
     -------
-    returns raw (as-traded) daily time series of the global equity specified: dict
+    dict: returns raw (as-traded) daily time series of the global equity specified
 
     Raises
     ------
@@ -78,6 +78,38 @@ def fetch_stock_data(symbol):
         raise requests.exceptions.RequestException(f"Unexpected response for {symbol}: {stock_data}")
 
     return stock_data
+
+def fetch_with_retry(symbol):
+    """Wraps fetch_stock_data with retry logic for transient network failures.
+
+    Retries ConnectionError and Timeout up to 2 times, with a backoff (2s, then 4s). 
+    All other exceptions (HTTPError, rate-limit detection) propogate immediately without retry.
+
+    Parameters
+    ----------
+    symbol: required
+        The name of the equity of your choice
+
+    Returns
+    -------
+    dict: returns raw (as-traded) daily time series of the global equity specified,
+    identical to fetch_stock_data's return value.
+
+    Raises
+    ------
+    requests.exceptions.ConnectionError, requests.exceptions.Timeout:
+        re-raises if all retry attempts are exhausted
+    requests.exceptions.HTTPError, requests.exceptions.RequestException:
+        propogate immediately, not retiredyes 
+    """
+    for attempt in range(3):
+        try:
+            result = fetch_stock_data(symbol)
+            return result
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if attempt == 2:
+                raise
+        time.sleep(2 ** attempt)
 
 def apply_threshold(data):
 

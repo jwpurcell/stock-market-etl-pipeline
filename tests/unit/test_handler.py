@@ -2,9 +2,11 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "fetch_stock_data"))
 import requests
+import time
 import pytest
 from app import apply_threshold
 from app import fetch_stock_data
+from app import fetch_with_retry
 
 # significant move sample
 @pytest.fixture()
@@ -94,3 +96,36 @@ def test_apply_threshold_nonsignificant_move(sample_stock_data2):
    
     assert tagged_day["significant_move"] == False
     assert tagged_day["pct_change"] == pytest.approx(1.0)
+
+
+
+def test_fetch_with_retry_succeeds_after_failure(monkeypatch):
+    call_count = [0]
+
+    def fake_get(url, params):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise requests.exceptions.ConnectionError("simulated network failure")
+        return FakeResponse({"Time Series (Daily)": {"2026-07-10":{}}})
+    
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(time, "sleep", lambda x: None) # skip waiting during tests
+
+    result = fetch_with_retry("IBM")
+    assert "Time Series (Daily)" in result 
+    assert call_count[0] == 2
+
+def test_fetch_with_retry_exhaust_all_attempts(monkeypatch):
+    call_count = [0]
+
+    def fake_get(url, params):
+        call_count[0] += 1
+        raise requests.exceptions.ConnectionError("simulated network failure")
+    
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(time, "sleep", lambda x: None) # skip waiting during tests
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        fetch_with_retry("IBM")
+    
+    assert call_count[0] == 3
