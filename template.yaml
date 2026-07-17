@@ -89,6 +89,48 @@ Resources:
           - Path: !Sub "s3://${StockDataBucket}/stock-data/"
       Schedule: 
         ScheduleExpression: cron(30 0 * * ? *)
+      SchemaChangePolicy:
+        UpdateBehavior: LOG
+        DeleteBehavior: LOG 
+  StockDataGlueTable:
+    Type: AWS::Glue::Table
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseName: !Ref StockDataGlueDatabase
+      TableInput:
+        Name: stock_data
+        PartitionKeys:
+          - Name: symbol
+            Type: string
+          - Name: year
+            Type: string
+          - Name: month
+            Type: string
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Columns:
+            - Name: open
+              Type: string
+            - Name: high
+              Type: string
+            - Name: low
+              Type: string
+            - Name: close
+              Type: string
+            - Name: volume
+              Type: string
+            - Name: pct_change
+              Type: double
+            - Name: significant_move
+              Type: boolean
+          Location: !Sub "s3://${StockDataBucket}/stock-data/"
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+            Parameters:
+              paths: "1. open,2. high,3. low,4. close,5. volume,pct_change,significant_move"
 Outputs:
   FetchStockDataFunction:
     Description: Fetch stock data Lambda Function ARN
