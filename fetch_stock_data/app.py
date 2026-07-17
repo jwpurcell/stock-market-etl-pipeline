@@ -32,7 +32,7 @@ def lambda_handler(event, context):
    
     for symbol in symbols_clean:
         try:
-            data = fetch_stock_data(symbol)
+            data = fetch_with_retry(symbol)
 
             data, most_recent_date = apply_threshold(data)
 
@@ -76,6 +76,19 @@ def fetch_stock_data(symbol):
 
     if "Time Series (Daily)" not in stock_data:
         raise requests.exceptions.RequestException(f"Unexpected response for {symbol}: {stock_data}")
+
+    most_recent_date = max(stock_data["Time Series (Daily)"])
+    latest_day_data = stock_data["Time Series (Daily)"][most_recent_date]
+
+    required_fields = ["1. open", "2. high", "3. low", "4. close", "5. volume"]
+
+    for field in required_fields:
+        if field not in latest_day_data:
+            raise requests.exceptions.RequestException(f"Missing field '{field}' for {symbol} on {most_recent_date}")
+        try:
+            float(latest_day_data[field])
+        except ValueError:
+            raise requests.exceptions.RequestException(f"Non-numeric value for '{field}' on {most_recent_date}: {latest_day_data[field]}")
 
     return stock_data
 

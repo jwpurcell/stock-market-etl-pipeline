@@ -106,7 +106,17 @@ def test_fetch_with_retry_succeeds_after_failure(monkeypatch):
         call_count[0] += 1
         if call_count[0] == 1:
             raise requests.exceptions.ConnectionError("simulated network failure")
-        return FakeResponse({"Time Series (Daily)": {"2026-07-10":{}}})
+        return FakeResponse({
+            "Time Series (Daily)": {
+                "2026-07-10":{
+                    "1. open": "100.00",
+                    "2. high": "101.00",
+                    "3. low": "99.00",
+                    "4. close": "100.50",
+                    "5. volume": "1000000"
+                }
+            }
+        })
     
     monkeypatch.setattr(requests, "get", fake_get)
     monkeypatch.setattr(time, "sleep", lambda x: None) # skip waiting during tests
