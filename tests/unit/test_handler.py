@@ -4,9 +4,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "fetch_st
 import requests
 import time
 import pytest
-from app import apply_threshold
-from app import fetch_stock_data
-from app import fetch_with_retry
+from app import apply_threshold, fetch_stock_data, fetch_with_retry
 
 # significant move sample
 @pytest.fixture()
@@ -139,3 +137,14 @@ def test_fetch_with_retry_exhaust_all_attempts(monkeypatch):
         fetch_with_retry("IBM")
     
     assert call_count[0] == 3
+
+def test_apply_threshold_explicit_target_date(sample_stock_data):
+    data, target_date = apply_threshold(sample_stock_data, target_date="2026-07-09")
+    assert target_date == "2026-07-09"
+
+    tagged_day = data["Time Series (Daily)"]["2026-07-09"]
+    assert "pct_change" in tagged_day
+    assert "significant_move" in tagged_day
+
+    untouched_day = data["Time Series (Daily)"]["2026-07-10"]
+    assert "pct_change" not in untouched_day

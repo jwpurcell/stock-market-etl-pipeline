@@ -34,9 +34,11 @@ def lambda_handler(event, context):
         try:
             data = fetch_with_retry(symbol)
 
-            data, most_recent_date = apply_threshold(data)
+            data, target_date = apply_threshold(data)
 
-            results[symbol] = write_to_s3(symbol, most_recent_date, data)
+            day_data = data["Time Series (Daily)"][target_date]
+
+            results[symbol] = write_to_s3(symbol, target_date, day_data)
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch data for {symbol}: {e}")
@@ -61,6 +63,11 @@ def fetch_stock_data(symbol):
     ------
     exceptions: requests.exceptions.ConnectionError, requests.exceptions.Timeout, requests.exceptions.HTTPError, requests.exceptions.JSONDecodeError
     
+    Also raises requests.exceptions.RequestException directly when:
+    - The response is missing the expected "Time Series (Daily)" key (e.g., Alpha Vantage rate-limit response)
+    - The most recent day's record is missing a required field (open/high/low/close/volume)
+    - The most recent day's record contains a non-numeric value for a required field
+
     API doc: https://www.alphavantage.co/documentation/ 
     """
 
@@ -124,45 +131,69 @@ def fetch_with_retry(symbol):
                 raise
         time.sleep(2 ** attempt)
 
-def apply_threshold(data):
+def apply_threshold(data, target_date=None):
+    """Computes daily percentage change and significance flag for a given day.
 
-    most_recent_date = max(data["Time Series (Daily)"])
-    latest_day_data = data["Time Series (Daily)"][most_recent_date]
-    daily_open = float(latest_day_data["1. open"])
-    daily_close = float(latest_day_data["4. close"])
+    Parameters
+    ----------
+    data: dict
+        The fetched stock data dict, containing "Time Series (Daily)".
+
+    target_date: str, optional
+        The specific date (YYYY-MM-DD) to tag.
+        If not provided defaults to the most recent date in the data (used by the daily pipeline).
+        Backfill passes this explicitly to tag every historical day.
+
+    Returns
+    -------
+    tuple: (data, target_date)
+        the enriched data dict and the data that was tagged.
+    """
+
+    # use the provided date if given (backfill), otherwise defualt to most recent date (daily pipeline)
+    if target_date is None:
+        target_date = max(data["Time Series (Daily)"])
+
+    day_data = data["Time Series (Daily)"][target_date]
+    daily_open = float(day_data["1. open"])
+    daily_close = float(day_data["4. close"])
 
     daily_pct_change = (daily_close - daily_open) / daily_open * 100
     significant_move = abs(daily_pct_change) > 3
 
-    latest_day_data["pct_change"] = daily_pct_change
-    latest_day_data["significant_move"] = significant_move
+    day_data["pct_change"] = daily_pct_change
+    day_data["significant_move"] = significant_move
 
-    return data, most_recent_date
+    return data, target_date
 
 
-def write_to_s3(symbol, most_recent_date, data):
-    """Writes the fetched and transformed data onto S3 bucket 
+def write_to_s3(symbol, target_date, day_data):
+    """Writes a single days enriched record to S3 
     
     Parameters
     ----------
-    symbol: Object key for which the PUT action was initiated.
+    symbol: str 
+        Object key for which the PUT action was initiated.
 
-    most_recent_date: most recent date of the data when fetched
-    
-    data: the fetched and transformed stock data dict to be written
+    target_date: str
+        the date (YYYY-MM-DD) this data represents
+
+    day_data: dict 
+        A single day's enriched record — the raw open/high/low/close/volume
+        fields plus the computed pct_change and significant_move tags for 
+        that specific date.
 
     Returns
     -------
-    returns str: S3 key/path in which data was written 
+    str:
+        S3 key/path in which data was written 
 
     Raises
     ------
     exceptions: botocore.exceptions.ClientError
     """
-    date_parts = most_recent_date.split("-")
-
+    date_parts = target_date.split("-")
     s3_key = f"stock-data/symbol={symbol}/year={date_parts[0]}/month={date_parts[1]}/day={date_parts[2]}/data.json"
-    json_data = json.dumps(data)
-    response = s3_client.put_object(Bucket=data_bucket, Key=s3_key, Body=json_data)
-
+    json_data = json.dumps(day_data)
+    s3_client.put_object(Bucket=data_bucket, Key=s3_key, Body=json_data)
     return s3_key
