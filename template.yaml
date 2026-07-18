@@ -18,6 +18,10 @@ Parameters:
     Description: symbol given to fetch_stock_data function for fetch request
     Type: CommaDelimitedList
     Default: IBM,AAPL,MSFT
+  AlarmEmail:
+    Type: String 
+    Description: Email address for CloudWatch alarm notifications
+    Default: stockmarketpipeline.alerts@outlook.com 
 Resources:
   StockDataGlueDatabase:
     Type: AWS::Glue::Database
@@ -137,9 +141,59 @@ Resources:
       Name: stock-data-workgroup
       WorkGroupConfiguration:
         ResultConfiguration:
-          OutputLocation: !Sub "s3://${StockDataBucket}/athena-result/"
+          OutputLocation: !Sub "s3://${StockDataBucket}/athena-results/"
         EnforceWorkGroupConfiguration: true
         PublishCloudWatchMetricsEnabled: true 
+  AlarmNotificationTopic:
+    Type: AWS::SNS::Topic 
+    Properties:
+      TopicName: stock-pipeline-alarms 
+      Subscription: 
+        - Protocol: email
+          Endpoint: !Ref AlarmEmail
+  ErrorLogMetricFilter:
+    Type: AWS::Logs::MetricFilter 
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${FetchStockDataFunction}"
+      FilterPattern: "ERROR"
+      MetricTransformations:
+        - MetricName: PipelineErrorCount
+          MetricNamespace: StockPipeline 
+          MetricValue: "1"
+  ErrorLogAlarm:
+    Type: AWS::CloudWatch::Alarm 
+    Properties: 
+      AlarmName: stock-market-pipeline-log-alarm
+      AlarmDescription: Fires when the pipeline logs an ERROR-level message
+      Namespace: StockPipeline
+      MetricName: PipelineErrorCount
+      Statistic: Sum 
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic 
+  UnhandledErrorAlarm:
+    Type: AWS::CloudWatch::Alarm 
+    Properties:
+      AlarmName: stock-pipeline-unhandled-error-alarm
+      AlarmDescription: Fires when the Lambda function has an unhandled invocation error
+      Namespace: AWS/Lambda
+      MetricName: Errors
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref FetchStockDataFunction
+      Statistic: Sum
+      Period: 86400
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref AlarmNotificationTopic
+
 Outputs:
   FetchStockDataFunction:
     Description: Fetch stock data Lambda Function ARN
