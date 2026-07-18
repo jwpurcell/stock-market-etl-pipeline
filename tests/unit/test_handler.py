@@ -80,20 +80,16 @@ def test_fetch_stock_data(monkeypatch):
 def test_apply_threshold_significant_move(sample_stock_data):
     data, most_recent_date = apply_threshold(sample_stock_data)
     assert most_recent_date == "2026-07-10"
-
-    tagged_day = data["Time Series (Daily)"][most_recent_date]
    
-    assert tagged_day["significant_move"]
-    assert tagged_day["pct_change"] == pytest.approx(5.0)
+    assert data["significant_move"]
+    assert data["pct_change"] == pytest.approx(5.0)
 
 def test_apply_threshold_nonsignificant_move(sample_stock_data2):
     data, most_recent_date = apply_threshold(sample_stock_data2)
     assert most_recent_date == "2026-07-10"
-
-    tagged_day = data["Time Series (Daily)"][most_recent_date]
    
-    assert tagged_day["significant_move"] == False
-    assert tagged_day["pct_change"] == pytest.approx(1.0)
+    assert data["significant_move"] == False
+    assert data["pct_change"] == pytest.approx(1.0)
 
 
 
@@ -142,9 +138,5 @@ def test_apply_threshold_explicit_target_date(sample_stock_data):
     data, target_date = apply_threshold(sample_stock_data, target_date="2026-07-09")
     assert target_date == "2026-07-09"
 
-    tagged_day = data["Time Series (Daily)"]["2026-07-09"]
-    assert "pct_change" in tagged_day
-    assert "significant_move" in tagged_day
-
-    untouched_day = data["Time Series (Daily)"]["2026-07-10"]
-    assert "pct_change" not in untouched_day
+    assert "pct_change" in data
+    assert "significant_move" in data

@@ -25,6 +25,15 @@ s3_client = boto3.client("s3")
 
 logger = logging.getLogger(__name__)
 
+# Field mapping from Alph vantage raw keys to clean keys 
+FIELD_MAPPING = {
+    "1. open": "open",
+    "2. high": "high",
+    "3. low": "low",
+    "4. close": "close",
+    "5. volume": "volume",
+}
+
 
 def lambda_handler(event, context):
    
@@ -36,9 +45,7 @@ def lambda_handler(event, context):
 
             data, target_date = apply_threshold(data)
 
-            day_data = data["Time Series (Daily)"][target_date]
-
-            results[symbol] = write_to_s3(symbol, target_date, day_data)
+            results[symbol] = write_to_s3(symbol, target_date, data)
             
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to fetch data for {symbol}: {e}")
@@ -146,8 +153,8 @@ def apply_threshold(data, target_date=None):
 
     Returns
     -------
-    tuple: (data, target_date)
-        the enriched data dict and the data that was tagged.
+    tuple: (clean_day_data, target_date)
+        the cleaned, enriched data dict and the data that was tagged.
     """
 
     # use the provided date if given (backfill), otherwise defualt to most recent date (daily pipeline)
@@ -161,10 +168,14 @@ def apply_threshold(data, target_date=None):
     daily_pct_change = (daily_close - daily_open) / daily_open * 100
     significant_move = abs(daily_pct_change) > 3
 
-    day_data["pct_change"] = daily_pct_change
-    day_data["significant_move"] = significant_move
+    clean_day_data = {}
+    for old_key, new_key in FIELD_MAPPING.items():
+        clean_day_data[new_key] = day_data[old_key]
 
-    return data, target_date
+    clean_day_data["pct_change"] = daily_pct_change
+    clean_day_data["significant_move"] = significant_move
+
+    return clean_day_data, target_date
 
 
 def write_to_s3(symbol, target_date, day_data):

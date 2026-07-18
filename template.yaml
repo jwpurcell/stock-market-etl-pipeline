@@ -131,6 +131,15 @@ Resources:
             SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
             Parameters:
               paths: "1. open,2. high,3. low,4. close,5. volume,pct_change,significant_move"
+  StockDataAthenaWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: stock-data-workgroup
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: !Sub "s3://${StockDataBucket}/athena-result/"
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true 
 Outputs:
   FetchStockDataFunction:
     Description: Fetch stock data Lambda Function ARN

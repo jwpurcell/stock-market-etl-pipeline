@@ -30,10 +30,9 @@ def backfill(symbol):
     # loop over every date key in the time series, not just the most recent.
     for date in data["Time Series (Daily)"]:
         # tag this specific date (not the default "most recent" behaviour).
-        tagged_data, target_date = apply_threshold(data, target_date=date)
-        day_data = tagged_data["Time Series (Daily)"][target_date]
+        clean_day_data, target_date = apply_threshold(data, target_date=date)
 
-        s3_key = write_to_s3(symbol, target_date, day_data)
+        s3_key = write_to_s3(symbol, target_date, clean_day_data)
         logger.info(f"Backfilled {symbol} {target_date} -> {s3_key}")
 
 if __name__ == "__main__":
