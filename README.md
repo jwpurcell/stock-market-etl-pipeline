@@ -6,7 +6,7 @@ The pipeline fetches daily time series data from the Alpha Vantage API, flags si
 
 Built as a portfolio project to demonstrate practical AWS serverless architecture and data engineering fundamentals.
 
-**Status**: Tier 1 (core pipeline) complete and deployed.
+**Status**: Tier 1 (core pipeline) and Tier 2 (resilience, transformation, queryability) complete and deployed. Tier 3 (dashboard, monitoring) planned, see Roadmap.
 
 ## Architecture 
 
@@ -72,6 +72,17 @@ Rather than filtering out the non-significant days, every fetched record is tagg
 
 Only the most recent day's record is tagged on each run, rather than recomputing percentage change across the full ~100-day history returned by Alpha Vantage each call. Historical days don't change, so retagging them daily would be a redundant computation with no new information gained. This does mean historical data sits untagged until a deliberate backfill step is run. A conscious tradeoff and a planned future improvement.
 
+**One-file-per-day restructuring**
+
+Originally, `write_to_s3` wrote the entire ~100-day Alpha Vantage response into a single file, meaning every day's partition redundantly contained all other day's data that didn't belong to it. This broke the correctness of the partition based querying (queries for a specific date would find that date duplicated across dozens of files, not clearly isolated in its own partition). `write to s3` and `apply_threshold` were changed so each S3 object holds exactly one day's record.
+
+**Immediate backfill over deferred backfill**
+
+The original roadmap deferred backfill as a future improvement, assuming raw historical data would already be sitting in the S3 bucket to reprocess later. The one-file-per-day restructuring removed that assumption (only the newest day is written, so a dashboard built on a few days of accumulated history wouldn't show anything meaningful). Backfill was moved from "deferred" to immediate: a one-time script (`scripts/backfill.py`, separate from lambda handler) fetches full history once per symbol and writes every day individually, giving the pipeline ~100 days of real, dashboard-ready history from day one rather than accumulating slowly. 
+
+**Field-name cleaning in Transform, not Load**
+
+Alpha Vantage's raw field names (`"1. open"`, `"2. high"`, etc.) are awkward, non-SQL-friendly identifiers. Rather than handling this in `write_to_s3`, renaming happens in `apply_threshold`, alongside the existing enrichment logic. This makes it a legitimate "Transform" step. `apply_threshold` builds a fresh, clean and enriched dict in its final, queryable form.
 
 ### Infrastructure/AWS design
 
@@ -91,6 +102,18 @@ Tracked symbols are defined as a SAM parameter (`FetchRequestSymbols`), not hard
 
 Runtime configuration (the S3 bucket name, tracked symbols) is passed to the Lambda via environment variables sourced directly from SAM template using `!Ref`, rather than duplicated as separate hardcoded values in `app.py`. This keeps a single source of truth, if the bucket name or symbol list ever changes, it only needs to change in one place, with no risk of the template and code being out of sync. 
 
+**Explicit Glue Table over Crawler-managed schema**
+
+The Crawler's auto-generated table correctly inferred types but preserved Alpha Vantage's raw, awkward column names. An explicit `AWS::Glue::Table` resource was added instead, with clean column names mapped to the raw JSON keys via the SerDe's `paths` parameter. The Crawler's `SchemaChangePolicy` was set to `LOG` (not `UPDATE_IN_DATABASE`), so it continues discovering new daily partitions automatically without ever overwriting the explicit schema on a future recrawl.
+
+**Glue Crawler over partition projection**
+
+Partition projection (calculating valid partitions mathematically) is more current AWS-recommended pattern for a predictably-growing daily partition scheme like this one. It was considered but deferred in favour of a Crawler, given the added CloudFormation complexity and risk of a subtle, hard to debug misconfiguration. The Crawler is scheduled daily, an hour after the pipeline's own run, to pick up each new partition.
+
+**Athena Workgroup**
+
+Unlike Lambda, S3, and SSM Parameter Store, AWS Glue Crawlers and Athena queries are not covered by an always-free tier. They're pay-as-you-go from the first run. At this project's data volume, the actual cost is a negligible fraction of a cent, but it's acknowledged to differ from the otherwise free-tier architecture.
+
 ### Error handling design 
 
 **Per-symbol try/except, continue-on-failure loop**
@@ -105,6 +128,18 @@ Alpha Vantage returns HTTP 200 even when rate-limited, with the actual error emb
 
 `fetch_stock_data` doesn't catch its own exceptions, it lets specific types (`ConnectionError`, `HTTPError`, `JSONDecodeError`, etc.) propagate up to the caller rather than collapsing everything into a generic failure or a `None` return. This was a deliberate choice: a future retry wrapper needs to distinguish a transient network blip (worth retrying) from a bad API key, and that distinction is lost the moment errors get swallowed at the source
 
+**Retry logic with exponential backoff**
+
+Alpha Vantage's rate-limiting had daily quotas that can be exhausted mid build. `fetch_stock_data` already kept specific exception types (`ConnectionError`, `Timeout`, `HTTPError`, and a custom rate-limit `RequestException`) propagate cleanly rather than swallowing them, specifically so a wrapper could react intelligently rather than retrying blindly. `fetch_with_retry` retries only `ConnectionError`/`Timeout` (transient network failures) up to twice, with an exponential backoff (2s, then 4s). `HTTPError` and the rate-limit exceptions propagate immediately, unretried. 
+
+**Field validation before writing to S3**
+
+The existing rate-limit check only validated that the response contained `"Time Series (Daily)"` key. `fetch_stock_data` now also confirms that the most recent day's record contains all five required fields (open/high/low/close/volume) and that each value is genuinely numeric, raising a descriptive `RequestException` if not. Scoped to the most recent day only, consistent with the pipeline's latest-day-only philosophy elsewhere; full historical validation was addressed directly by the backfill script re-fetching and reprocessing every day from source, rather than needing separate retroactive validation logic.
+
+**Production bug: dotted JSON keys and Glue SerDe**
+
+After deploying the Glue table with clean column names, Athena queries returned populated values for `pct_change`/`significant_move` but empty values for every raw field (`open`, `high`, `low`, `close`, `volume`). The root cause: Alpha Vantage's raw keys contain literal periods (`"1. open"`), which the JSON SerDe's `paths` mapping appears to interpret as a nested-field separator rather than a literal key, silently failing the lookup. Rather than working around the SerDe's handling of dotted keys, the fix was to stop writing dotted keys to S3 at all, cleaning field names during Transform.
+
 ### Dashboard design 
 
 **Streamlit over traditional BI platforms (Tableau, Power BI, Metabase)**
@@ -116,23 +151,11 @@ Considered a traditional BI platform for the final dashboard layer (Metabase spe
 
 **CloudWatch alarm over DLQ**
 
+The first production deploy silently failed for two days: `sam deploy --guided` hadn't correctly bundled the `requests` dependency into the deployment package, so every scheduled invocation failed with `Runtime.ImportModuleError` before any application code ran. Nothing surfaced automatically (it was only caught by manually checking S3). Fixed by running `sam build` explicitly before deployment, rather than relying on the guided deploy to handle it. This incident is the concrete motivation behind the alarm below.
+
 A CloudWatch alarm was chosen over a Dead Letter Queue for monitoring failed runs. A DLQ only captures fully failed Lambda invocations, but the pipeline's per-symbol `try`/`except` already catches and logs individual failures (e.g. a rate-limited symbol) without crashing the whole run, so the most likely failure mode never reaches "total invocation failure". A CloudWatch alarm watching for `error`-level log entries covers both that partial-failure case and genuinely unexpected crashes, making it the broader, more useful choice given the pipeline's existing error handling. 
 
 ## Improvements / Roadmap
-
-### In Progress: 
-
-**Retry logic with exponential backoff of the Alpha Vantage call**
-
-Alpha Vantage's free tier has aggressive rate limits. The current pipeline lets specific exception types propagate cleanly from `fetch_stock_data`, so a retry wrapper can distinguish between failures worth retrying from permanent ones (bad API key, invalid request) rather than retrying blindly.
-
-**Data validation/schema check before writing to s3**
-
-Currently, the pipeline validates for one specific failure mode (Alpha Vantage rate-limiting, detected via a missing `"Time Series (Daily)"` key). This will be extended into a general schema/validation check confirming the full shape and types of the fetched data (open/high/low/close/volume) before writing to S3, rather than validating only the top-level structure.
-
-**Glue Crawler/Glue Data catalog + Athena workgroup for SQL queryability**
-
-The raw JSON files in S3 are partitioned Hive-style specifically so they'd be automatically discoverable by a glue crawler without a rework. Once catalogued, Athena makes the full dataset SQL-queryable, feeding directly into the dashboard layer. 
 
 ### Planned: 
 
