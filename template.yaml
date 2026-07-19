@@ -78,6 +78,11 @@ Resources:
             Name: DailyStockFetchSchedule
             Description: Triggers stock data fetch once daily after the market closes
             Enabled: true
+      EventInvokeConfig:
+        DestinationConfig:
+          OnSuccess:
+            Type: Lambda 
+            Destination: !GetAtt StartCrawlerFunction.Arn 
   StockDataBucket:
     Type: AWS::S3::Bucket
     Properties:
@@ -91,8 +96,6 @@ Resources:
       Targets:
         S3Targets:
           - Path: !Sub "s3://${StockDataBucket}/stock-data/"
-      Schedule: 
-        ScheduleExpression: cron(30 0 * * ? *)
       SchemaChangePolicy:
         UpdateBehavior: LOG
         DeleteBehavior: LOG 
@@ -253,7 +256,30 @@ Resources:
                 - !Sub "${StockDataBucket.Arn}/*"
       Architectures:
         - x86_64 
-
+  StartCrawlerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: start_crawler/
+      Handler: app.lambda_handler
+      Runtime: python3.14
+      Environment:
+        Variables:
+          CRAWLER_NAME: !Ref StockDataGlueCrawler
+      Policies:
+        - Statement: 
+            - Effect: Allow
+              Action:
+                - glue:StartCrawler 
+              Resource: "*"
+      Architectures:
+        - x86_64 
+  FetchStockDataInvokeCrawlerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StartCrawlerFunction
+      Action: lambda:InvokeFunction
+      Principal: lambda.amazonaws.com
+      SourceArn: !GetAtt FetchStockDataFunction.Arn
 Outputs:
   FetchStockDataFunction:
     Description: Fetch stock data Lambda Function ARN
