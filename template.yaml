@@ -280,6 +280,34 @@ Resources:
       Action: lambda:InvokeFunction
       Principal: lambda.amazonaws.com
       SourceArn: !GetAtt FetchStockDataFunction.Arn
+  StreamlitReadOnlyUser:
+    Type: AWS::IAM::User 
+    Properties: 
+      UserName: streamlit-dashboard-reader 
+      Policies:
+        - PolicyName: DashboardExportReadOnly
+          PolicyDocument: 
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow 
+                Action: 
+                  - s3:GetObject
+                Resource:
+                  - !Sub "${StockDataBucket.Arn}/dashboard-export/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt StockDataBucket.Arn
+                Condition:
+                  StringLike:
+                    s3:prefix: "dashboard-export/*"
+
+  StreamlitReadOnlyUserKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref StreamlitReadOnlyUser
+
 Outputs:
   FetchStockDataFunction:
     Description: Fetch stock data Lambda Function ARN
@@ -287,3 +315,7 @@ Outputs:
   FetchStockDataFunctionIamRole:
     Description: Implicit IAM Role created for fetch stock data function
     Value: !GetAtt FetchStockDataFunctionRole.Arn
+  StreamlitAccessKeysOutput:
+    Value: !Ref StreamlitReadOnlyUserKey
+    Description: Access Key ID for Streamlit reader
+ 
