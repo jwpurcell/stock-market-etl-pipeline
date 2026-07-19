@@ -1,26 +1,38 @@
 # stock-market-etl-pipeline
 
-A serverless ETL pipeline tracking daily stock market data for a set of equities (IBM, AAPL, MSFT), built on AWS SAM, Lambda, and EventBridge.
+A serverless, fully event-driven ETL pipeline and dashboard for daily stock market data (IBM, AAPL, MSFT), built on AWS (SAM, Lambda, EventBridge, S3, Glue, Athena) with a Streamlit front end.
 
-The pipeline fetches daily time series data from the Alpha Vantage API, flags significant price movements against a threshold, writes the enriched data to an S3 bucket partitioned Hive-style, supporting future querying and dashboard layer. 
+The pipeline fetches daily time series data from the Alpha Vantage API, flags significant price movements against a threshold, and writes the enriched data to S3 using Hive-style partitioning. From there, a fully event-driven chain of Lambdas catalogs the data via Glue, transforms it into a queryable Parquet export via Athena, and feeds an interactive Streamlit dashboard — with no fixed-time assumptions beyond the pipeline's initial daily trigger.
 
 Built as a portfolio project to demonstrate practical AWS serverless architecture and data engineering fundamentals.
 
-**Status**: Tier 1 (core pipeline) and Tier 2 (resilience, transformation, queryability) complete and deployed. Tier 3 (dashboard, monitoring) planned, see Roadmap.
+**Status**: Complete. Tiers 1–3 deployed: a fully event-driven serverless ETL pipeline with an interactive dashboard. [Live Dashboard](https://stock-market-etl-dashboard.streamlit.app/)
 
 ## Architecture 
 
-The pipeline runs automatically once daily via an EventBridge scheduled rule, which invokes the Lambda function to execute the following three stages:
+![Architecture Diagram](docs/architecture-diagram.png)
 
-**Extract**: fetches daily time series data for tracked equities (IBM, AAPL, MSFT) from the Alpha Vantage API, retrieving the API key securely from SSM Parameter Store.
+The pipeline follows an EtLT pattern. It has a lightweight transform at ingestion, followed by a full transform once the day's data is catalogued, orchestrated entirely through events, with no fixed-time assumptions beyond the single scheduled starting point.
 
-**Transform**: Computes daily percentage change for the most recent trading day and flags moves exceeding a 3% threshold as significant, tagging the data in place. 
+**Extract**: An EventBridge schedule triggers the pipeline once daily, fetching time series data for tracked equities from the Alpha Vantage API, with the API key retrieved securely from SSM Parameter Store.
 
-**Load**: Writes the enriched data to S3 using Hive-style partitioning (`symbol=/year=/month=/day=`), chosen to support future querying by symbol as the primary access pattern.
+**t (light transform)**: Each day's record is enriched with a computed percentage change and significance flag, and its field names are cleaned for downstream queryability, before being written to S3 as a single, immutable, Hive-partitioned file.
+
+**Load**: The enriched record is written to S3, partitioned by `symbol=/year=/month=/day=`.
+
+**Catalogue**: On the pipeline's success, a Lambda destination triggers a second Lambda that starts a Glue Crawler, which discovers new partitions and registers them against an explicitly-defined Glue Table (not a Crawler-managed schema, to preserve clean column names).
+
+**T (full transform)**: The Crawler's completion event triggers a third Lambda, which runs a CTAS query against the catalogued data, producing a new, immutable, date-stamped Parquet export (a dashboard-ready "gold layer," distinct from the raw per-day records).
+
+**Serve**: A Streamlit dashboard, using narrowly-scoped, read-only credentials, reads the most recent export directly from S3 and renders it as an interactive, filterable interface.
+
+Every stage beyond the initial schedule is triggered by the actual completion of the stage before it, not a fixed time delay. This removes time-assumption bugs a purely schedule-based pipeline would be prone to.
 
 ## Setup
 
-```
+### Core pipeline
+
+```bash
 # clone the repo 
 git clone <repo_url>
 cd stock-market-etl-pipeline
@@ -28,7 +40,6 @@ cd stock-market-etl-pipeline
 # Install Python dependencies (local testing)
 python -m pip install -r fetch_stock_data/requirements.txt
 python -m pip install boto3
-python -m pip install -r tests/requirements.txt
 
 # Configure AWS credentials 
 aws configure 
@@ -45,18 +56,51 @@ sam validate
 # Build the application  
 sam build 
 
-# Deploy (first time, guided)
-sam deploy --guided 
+# Deploy (first time, guided) - requires both capabilities, since this stack creates an explicitly-named IAM user (StreamlitReadOnlyUser)
+sam deploy --guided --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM
 ```
 
-```
-# Set environment variables for local testing
+```bash
+# Set environment variables for local testing of core pipeline
 export STOCK_SYMBOLS="IBM,AAPL,MSFT"
 export BUCKET_NAME="stock-market-etl-data-<your-account-id>"
+
+# Set environment variables for local testing of the export/crawler Lambdas
+export ATHENA_WORKGROUP="stock-data-workgroup"
+export GLUE_DATABASE="stock_market_etl_db"
+export CRAWLER_NAME="stock-data-crawler"
 ```
 
+### Historical backfill (optional, one-time)
+
+```bash
+python scripts/backfill.py
+```
+
+### Dashboard (local development)
+
+```bash
+# Install dashboard-specific dependencies
+python -m pip install -r dashboard/requirements.txt
+```
+
+Create `dashboard/.streamlit/secrets.toml` (gitignored, never committed) with:
+
+```toml
+AWS_ACCESS_KEY_ID = "your-scoped-reader-access-key-id"
+AWS_SECRET_ACCESS_KEY = "your-scoped-reader-secret-access-key"
+BUCKET_NAME = "stock-market-etl-data-<your-account-id>"
+```
+
+These credentials belong to a dedicated, narrowly-scoped IAM user (`StreamlitReadOnlyUser`, created by the stack) with read-only access limited to the `dashboard-export/` prefix — never your AWS admin credentials.
+
+```bash
+streamlit run dashboard/streamlit_app.py
+```
 
 ## Design
+
+This pipeline follows an EtLT pattern: a lightweight transform at ingestion, and a second, full transform once the day's data is catalogued, producing a dashboard-ready serving layer. The pipeline and the Streamlit dashboard are loosely, not fully, coupled, so the pipeline has no knowledge of Streamlit or how its output is consumed, and the transport mechanism (export -> Parquet -> read) would work unchanged for a differently-shaped dataset. The dashboard's specific views remain coupled to this dataset's actual columns, so full reusability would require a schema-agnostic dashboard, which was out of scope here.
 
 ### Data/pipeline design
 
@@ -83,6 +127,18 @@ The original roadmap deferred backfill as a future improvement, assuming raw his
 **Field-name cleaning in Transform, not Load**
 
 Alpha Vantage's raw field names (`"1. open"`, `"2. high"`, etc.) are awkward, non-SQL-friendly identifiers. Rather than handling this in `write_to_s3`, renaming happens in `apply_threshold`, alongside the existing enrichment logic. This makes it a legitimate "Transform" step. `apply_threshold` builds a fresh, clean and enriched dict in its final, queryable form.
+
+**Immutable versioned Parquet exports (CTAS)**
+
+CTAS cannot be rerun against the same output location, it requires the target to be empty, and fails outright on a rerun rather than overwriting. Rather than working around this with a delete-then-recreate step, each day's export is written to its own date-stamped table and S3 location. This works *with* CTAS's constraints rather than against them, and gives a free historical audit trail of every day's dashboard-ready snapshot as a side effect.
+
+**Volatility as standard deviation**
+
+Total Volatility is computed as the standard deviation of daily `pct_change`, not the average magnitude of daily moves. A stock moving a steady +2% every day would show near-zero volatility by this measure, despite meaningful daily movement, because standard deviation measures variability around the mean, not the size of moves themselves, which is the more standard, correct definition of volatility in practice.
+
+**20-day moving average**
+
+20 trading days is the standard "monthly" moving average period in real financial analysis. Given the ~100-day dataset, this costs roughly the first fifth of the chart as warm-up (no average until 20 days of data exist), a tradeoff accepted in favor of using a widely-recognized, explainable period over one purely optimized for this dataset's limited size.
 
 ### Infrastructure/AWS design
 
@@ -113,6 +169,14 @@ Partition projection (calculating valid partitions mathematically) is more curre
 **Athena Workgroup**
 
 Unlike Lambda, S3, and SSM Parameter Store, AWS Glue Crawlers and Athena queries are not covered by an always-free tier. They're pay-as-you-go from the first run. At this project's data volume, the actual cost is a negligible fraction of a cent, but it's acknowledged to differ from the otherwise free-tier architecture.
+
+**Fully event driven three-stage orchestration**
+
+The Crawler originally ran on a fixed schedule, assuming the main pipeline had already finished, the same fragile timing assumption already identified and fixed once between the Crawler and the export step. Rather than leaving one link in the chain still schedule-based, a third Lambda was added to close the gap: `FetchStockDataFunction`'s Lambda destination triggers it on success, and it starts the Crawler directly, whose own completion event triggers the export Lambda. Only the pipeline's initial trigger remains time-based, since it's the one stage with no upstream event to react to; every downstream stage reacts to the actual completion of the stage before it.
+
+**Narrowly scoped Streamlit IAM user + secrets management**
+
+The dashboard reads from S3 using a dedicated IAM user (`StreamlitReadOnlyUser`) granted only `s3:GetObject` and `s3:ListBucket`, both restricted to the `dashboard-export/` prefix specifically, no access to raw pipeline data, no write access, and no broad or ambient credentials in a publicly-deployed app. Credentials are stored in Streamlit's secrets management, never committed to the repository; the access key was retrieved once via a temporary CloudFormation output, then removed.
 
 ### Error handling design 
 
@@ -146,6 +210,9 @@ After deploying the Glue table with clean column names, Athena queries returned 
 
 Considered a traditional BI platform for the final dashboard layer (Metabase specifically given its free, self-hosting option). BI platforms would model a more realistic hand off point of a queryable tool to non-technical stakeholders. Streamlit was chosen instead for this stage: it demonstrates full end-to-end technical ownership (building the interface, not just using a platform) and produces a freely hosted, instantly interactable link for a resume. The BI-handoff reasoning remains a deliberate tradeoff worth revisiting for future portfolio work.
 
+**KDE vs plain histogram**
+
+A Kernel Density Estimate treats each data point as the center of a smooth "bump," summing them into one continuous curve, avoiding the arbitrary bin-boundary artifacts of a plain histogram. For a real, unimodal, roughly-bell-shaped distribution of daily returns like this dataset's, KDE reveals the underlying shape of the return distribution more clearly than blocky bins alone, this is genuinely useful, since the shape (not just volatility) of a stock's return distribution is a real, meaningful financial question.
 
 ### Monitoring design 
 
@@ -159,10 +226,6 @@ A CloudWatch alarm was chosen over a Dead Letter Queue for monitoring failed run
 
 ### Planned: 
 
-**Streamlit dashboard reading from Athena/S3 output**
+**Partition projection**
 
-An interactive dashboard hosted on Streamlit Community Cloud, reading from the pipeline's Athena/S3 output on a periodic refresh rather than live queries. This avoids public-facing credentials, and unbounded query costs as it's freely hosted.
-
-**Cloudwatch alarm for failed runs**
-
-An alarm watching for error-level entries in CloudWatch Logs, triggered by the pipeline's existing `logger.error()` calls. This surfaces partial failures (e.g. a rate-limited symbol) and any unhandled exceptions without needing to manually check logs after each run.
+Considered over the current Crawler-based partition discovery for its lower ongoing cost and more current AWS-recommended pattern; deferred for the Crawler's simpler, lower-risk CloudFormation given project timeline constraints. See Design Decisions.
