@@ -142,7 +142,7 @@ Resources:
       WorkGroupConfiguration:
         ResultConfiguration:
           OutputLocation: !Sub "s3://${StockDataBucket}/athena-results/"
-        EnforceWorkGroupConfiguration: true
+        EnforceWorkGroupConfiguration: false
         PublishCloudWatchMetricsEnabled: true 
   AlarmNotificationTopic:
     Type: AWS::SNS::Topic 
@@ -193,6 +193,66 @@ Resources:
       TreatMissingData: notBreaching
       AlarmActions:
         - !Ref AlarmNotificationTopic
+  CrawlerCompletionRule:
+    Type: AWS::Events::Rule 
+    Properties: 
+      EventPattern:
+        source: 
+          - aws.glue
+        detail-type:
+          - Glue Crawler State Change 
+        detail:
+          crawlerName:
+            - stock-data-crawler
+          state:
+            - Succeeded
+      Targets:
+        - Arn: !GetAtt DashboardExportFunction.Arn
+          Id: ExportFunctionTarget
+  DashboardExportPermission:
+    Type: AWS::Lambda::Permission 
+    Properties:
+      FunctionName: !Ref DashboardExportFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CrawlerCompletionRule.Arn
+  DashboardExportFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: export_dashboard_data/
+      Handler: app.lambda_handler
+      Runtime: python3.14
+      Environment:
+        Variables:
+          BUCKET_NAME: !Ref StockDataBucket 
+          ATHENA_WORKGROUP: !Ref StockDataAthenaWorkGroup
+          GLUE_DATABASE: !Ref StockDataGlueDatabase
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action:
+                - athena:StartQueryExecution
+                - athena:GetQueryExecution
+                - athena:GetQueryResults
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - glue:GetTable
+                - glue:GetDatabase
+                - glue:CreateTable
+                - glue:GetPartitions
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource:
+                - !Sub "${StockDataBucket.Arn}"
+                - !Sub "${StockDataBucket.Arn}/*"
+      Architectures:
+        - x86_64 
 
 Outputs:
   FetchStockDataFunction:
